@@ -221,8 +221,34 @@ Fixpoint mach_interp (C: code) (fuel: nat)
   | S fuel' =>
       match code_at C pc, stk with
       | Some Ihalt, nil => Terminates st
-      | Some (Iconst n), stk => mach_interp C fuel' (pc + 1) (n :: stk) st
-      (* FILL IN HERE *)
+      | Some (Iconst n), stk =>
+        mach_interp C fuel' (pc + 1) (n :: stk) st
+      | Some (Ivar x), stk =>
+        mach_interp C fuel' (pc + 1) (st x :: stk) st
+      | Some (Isetvar x), n :: stk =>
+        mach_interp C fuel' (pc + 1) stk (t_update st x n)
+      | Some Iadd, n2::n1::stk =>
+        mach_interp C fuel' (pc + 1) ((n1+n2)::stk) st
+      | Some Isub, n2::n1::stk =>
+        mach_interp C fuel' (pc + 1) ((n1-n2)::stk) st
+      | Some Imul, n2::n1::stk =>
+        mach_interp C fuel' (pc + 1) ((n1*n2)::stk) st
+      | Some (Ibranch_forward ofs), stk =>
+        mach_interp C fuel' (pc + 1 + ofs) stk st
+      | Some (Ibranch_backward ofs), stk =>
+        mach_interp C fuel' (pc + 1 - ofs) stk st
+      | Some (Ibeq ofs), n2::n1::stk =>
+        let pc' := (if beq_nat n1 n2 then pc + 1 + ofs else pc + 1) in
+        mach_interp C fuel' pc' stk st
+      | Some (Ibne ofs), n2::n1::stk =>
+        let pc' := (if beq_nat n1 n2 then pc + 1 else pc + 1 + ofs) in
+        mach_interp C fuel' pc' stk st
+      | Some (Ible ofs), n2::n1::stk =>
+        let pc' := (if leb n1 n2 then pc + 1 + ofs else pc + 1) in
+        mach_interp C fuel' pc' stk st
+      | Some (Ibgt ofs), n2::n1::stk =>
+        let pc' := (if leb n1 n2 then pc + 1 else pc + 1 + ofs) in
+        mach_interp C fuel' pc' stk st
       | _, _ => GoesWrong
       end
   end.
@@ -316,14 +342,18 @@ Fixpoint compile_com (c: com) : code :=
   | (id ::= a) =>
       compile_aexp a ++ Isetvar id :: nil
   | (c1 ;; c2) =>
-      compile_com c1 ++ compile_com c2
+    compile_com c1 ++ compile_com c2
   | IFB b THEN ifso ELSE ifnot FI =>
       let code_ifso := compile_com ifso in
       let code_ifnot := compile_com ifnot in
-      compile_bexp b false (length code_ifso + 1)
+      let code_branch := match code_ifnot with
+                         | nil => nil
+                         | _ => Ibranch_forward (length code_ifnot) :: nil
+                         end in                         
+      compile_bexp b false (length code_ifso + length code_branch)
       ++ code_ifso
-      ++ Ibranch_forward (length code_ifnot)
-      :: code_ifnot
+      ++ code_branch 
+      ++ code_ifnot
   | WHILE b DO body END =>
       let code_body := compile_com body in
       let code_test := compile_bexp b false (length code_body + 1) in
@@ -595,26 +625,46 @@ Proof.
 - (* if true *)
   simpl in *.
   set (code1 := compile_com c1) in *.
-  set (codeb := compile_bexp b false (length code1 + 1)) in *.
   set (code2 := compile_com c2) in *.
-  eapply star_trans. 
-  apply compile_bexp_correct with (b := b) (cond := false) (ofs := length code1 + 1).
-  eauto with codeseq. 
+  remember match code2 with
+                  | nil => 0
+                  | _ => 1
+                  end as ofs_br.
+  set (codeb := compile_bexp b false (length code1 + ofs_br)) in *.
+  eapply star_trans.
+  apply compile_bexp_correct with (b := b) (cond := false) (ofs := length code1 + ofs_br).
+  destruct code2; subst ofs_br; normalize; eauto with codeseq.
   rewrite H. simpl. rewrite plus_0_r. fold codeb. normalize.
-  eapply star_trans. apply IHceval. eauto with codeseq. 
-  apply star_one. eapply trans_branch_forward. eauto with codeseq. omega.
+  eapply star_trans. apply IHceval.
+  destruct code2; subst ofs_br; eauto with codeseq.
+  destruct code2; subst ofs_br; normalize.
+  assert (length code1 = length code1 + 0). omega.
+  rewrite H1. fold codeb. constructor.
+  apply star_one. eapply trans_branch_forward. 
+  eauto with codeseq. fold codeb. omega.
 
 - (* if false *)
   simpl in *.
   set (code1 := compile_com c1) in *.
-  set (codeb := compile_bexp b false (length code1 + 1)) in *.
   set (code2 := compile_com c2) in *.
+  remember match code2 with
+           | nil => 0
+           | _ => 1
+           end as ofs_br.
+  remember (compile_bexp b false (length code1 + ofs_br)) as codeb.
   eapply star_trans. 
-  apply compile_bexp_correct with (b := b) (cond := false) (ofs := length code1 + 1).
-  eauto with codeseq. 
-  rewrite H. simpl. fold codeb. normalize.
+  apply compile_bexp_correct with (b := b) (cond := false) (ofs := length code1 + ofs_br).
+  destruct code2; subst ofs_br; normalize; eauto with codeseq.
+  rewrite H. simpl. rewrite <- Heqcodeb. normalize.
+  destruct code2; subst ofs_br; normalize. rewrite <- Heqcodeb.
+  replace (star (transition C) (pc + length codeb + length code1, stk, st) (pc + length codeb + length code1, stk, st')) with
+      (star (transition C) (pc + length codeb + length code1, stk, st) (pc + length codeb + length code1 + 0, stk, st')).
+  apply IHceval. rewrite <- Heqcodeb in AT. 
+  eauto with codeseq.
+  rewrite plus_0_r. reflexivity.
+  rewrite <- Heqcodeb in *.
   replace (pc + length codeb + length code1 + S(length code2))
-     with (pc + length codeb + length code1 + 1 + length code2).
+    with (pc + length codeb + length code1 + 1 + length code2).
   apply IHceval. eauto with codeseq. omega. 
 
 - (* while false *)
@@ -664,8 +714,10 @@ Lemma trans_smart_branch_forward:
   star (transition C) (pc, stk, st) (pc + length (smart_Ibranch_forward ofs) + ofs, stk, st).
 Proof.
   unfold smart_Ibranch_forward; intros.
-  (* FILL IN HERE *)
-Admitted.
+  destruct ofs; normalize. constructor.
+  apply star_one. eapply trans_branch_forward. eauto with codeseq.
+  omega.
+Qed.
 
 (** *** Exercise (3 stars, optional) *)
 (** The manufacturer of our virtual machine offers a cheaper variant
